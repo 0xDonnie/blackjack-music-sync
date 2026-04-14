@@ -1,0 +1,37 @@
+# Config privata - mai committare
+config.ps1
+README.local.md
+
+# Cookies YouTube esportati - contengono sessioni di login, mai committare
+cookies.txt
+*cookies*.txt
+
+# File generati dallo script sul NAS
+.archive
+_id_map.txt
+_unavailable.txt
+*.m3u
+sync.log
+
+# File temporanei della GUI
+_temp_sync_config.ps1
+_temp_sync_stdout.log
+_temp_sync_stderr.log
+
+# v3 - file di stato del check engine + URI handler
+_v3_pending.json
+_v3_*.json
+_v3_handler.log
+_temp_v3_sync_config.ps1
+
+# File temporanei yt-dlp
+*.webm
+*.webp
+*.part
+
+# Mai committare archivi/dump
+*.zip
+*.tar
+*.tar.gz
+*.7z
+*.rar

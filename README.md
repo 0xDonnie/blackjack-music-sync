@@ -44,10 +44,18 @@ Copy-Item config.example.ps1 config.ps1
 ```
 Then open `config.ps1` and fill in your folder path and playlist URLs.
 
-**3. Run**
+**3. Launch the GUI**
+
+Double-click **`blackjack-music-sync.cmd`** and the GUI opens. You'll see a brief flash of a console window, then the dark-theme GUI appears.
+
+Alternative from terminal:
 ```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-.\sync_playlists.ps1
+pwsh -NoProfile -ExecutionPolicy Bypass -File gui_v1.ps1
+```
+
+For headless / automated use without the GUI:
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File sync_playlists_v1.ps1
 ```
 
 ---
@@ -89,9 +97,11 @@ Most tools either re-download everything or rely on the YouTube ID being embedde
 
 ## Automation
 
-To run weekly on Windows Task Scheduler, create a task that runs:
+Use the **Monitor tab** in the GUI to schedule automatic update checks (Daily / Every 3 days / Weekly / Monthly / Semestral) — it registers a Windows Scheduled Task for you. When new tracks are detected, you can click "Sync pending now" from the same tab.
+
+For fully unattended sync via Task Scheduler manually:
 ```
-powershell.exe -ExecutionPolicy Bypass -File "C:\path\to\sync_playlists.ps1"
+pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "C:\path\to\sync_playlists_v1.ps1"
 ```
 
 ---

@@ -8,7 +8,7 @@
 # Examples:
 #   "C:\Music\Playlists"
 #   "Z:\MyPlaylists"          (network drive)
-#   "\\192.168.1.x\music"     (UNC path)
+#   "\\YOUR-NAS-IP\music"     (UNC path)
 $BASE_DIR = "Z:\Music\Playlists"
 
 # Duration tolerance in seconds for local file vs YouTube duration matching

@@ -19,6 +19,87 @@ if (-not (Test-Path -LiteralPath $configPath)) {
 
 $syncScriptPath = Join-Path $PSScriptRoot "sync_playlists_v1.ps1"
 
+# --- Startup dependency check ---
+# La GUI Windows usa SSH per parlare col Linux worker (proxy yt-dlp).
+# Host viene da $LINUX_WORKER_HOST nel config.ps1 (vuoto = SSH proxy disabilitato).
+$WORKER_HOST = if ((Get-Variable -Name LINUX_WORKER_HOST -ErrorAction SilentlyContinue) -and $LINUX_WORKER_HOST) {
+    $LINUX_WORKER_HOST
+} else {
+    ""
+}
+
+$script:healthCheckSummary = ""
+
+function Test-StartupDeps {
+    $missing  = @()
+    $commands = @()
+
+    if (-not (Get-Command ssh -ErrorAction SilentlyContinue)) {
+        $missing  += "ssh (OpenSSH client)"
+        $commands += "Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0"
+    }
+
+    $sshReachable = $true
+    $workerYtdlp  = "?"
+    $workerCookies = "?"
+
+    # Se $LINUX_WORKER_HOST è vuoto, l'utente non usa il proxy SSH —
+    # niente check, niente popup. La GUI parte e usa yt-dlp locale.
+    if (-not $WORKER_HOST) {
+        $script:healthCheckSummary = "[HEALTH] SSH proxy disabilitato (configura LINUX_WORKER_HOST in config.ps1 per attivare)"
+        return $true
+    }
+
+    if ($missing.Count -eq 0) {
+        try {
+            # Healthcheck: 10s timeout (la 1a connessione SSH può essere lenta),
+            # accept-new permette di accettare automaticamente nuovi host fingerprint.
+            $probe = ssh -o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=accept-new $WORKER_HOST 'echo "ytdlp=$(command -v yt-dlp >/dev/null && echo OK || echo MISSING)";echo "cookies=$([ -f ~/blackjack/cookies.txt ] && echo OK || echo MISSING)"' 2>$null
+            if ($LASTEXITCODE -ne 0 -or -not $probe) {
+                $sshReachable = $false
+            } else {
+                # NB: $probe is a string ARRAY; -match on array filters but doesn't
+                # populate $matches. Join into single string first.
+                $probeStr = $probe -join "`n"
+                if ($probeStr -match 'ytdlp=(\S+)')   { $workerYtdlp   = $matches[1] }
+                if ($probeStr -match 'cookies=(\S+)') { $workerCookies = $matches[1] }
+            }
+        } catch { $sshReachable = $false }
+    }
+
+    $script:healthCheckSummary = if ($sshReachable) {
+        "[HEALTH] ssh=OK · worker yt-dlp=$workerYtdlp · cookies=$workerCookies"
+    } else {
+        "[HEALTH] ssh=FAIL — worker non raggiungibile, fetch playlist non funzionerà"
+    }
+
+    if ($missing.Count -gt 0) {
+        $msg = "Dipendenze Windows mancanti:`n  - $($missing -join "`n  - ")`n`n"
+        $msg += "Installa con (PowerShell come Admin):`n`n"
+        $msg += ($commands -join "`n")
+        $msg += "`n`nHo copiato i comandi negli appunti. Apri PowerShell come Admin, paste, run, riapri la GUI."
+        $commands -join "`n" | Set-Clipboard
+        [System.Windows.Forms.MessageBox]::Show($msg, "blackjack-music-sync — dipendenze", "OK", "Error") | Out-Null
+        return $false
+    }
+
+    if (-not $sshReachable) {
+        $msg = "Linux worker '$WORKER_HOST' non raggiungibile via SSH.`n`n"
+        $msg += "Verifica che:`n"
+        $msg += "  - Il laptop sia acceso e in rete`n"
+        $msg += "  - La chiave SSH sia configurata (no password prompts)`n"
+        $msg += "  - L'host '$WORKER_HOST' sia ancora corretto in config.ps1 (`$LINUX_WORKER_HOST)`n`n"
+        $msg += "Per ora la GUI parte ma Fetch/Refresh/Multi Add NON funzioneranno.`n"
+        $msg += "Continuo lo stesso?"
+        $result = [System.Windows.Forms.MessageBox]::Show($msg, "blackjack-music-sync — worker offline", "OKCancel", "Warning")
+        if ($result -ne "OK") { return $false }
+    }
+
+    return $true
+}
+
+if (-not (Test-StartupDeps)) { exit }
+
 # --- Colors ---
 $bgColor     = [System.Drawing.Color]::FromArgb(15, 15, 20)
 $panelColor  = [System.Drawing.Color]::FromArgb(25, 25, 35)
@@ -80,10 +161,26 @@ function ConvertTo-SafeFolderName {
     return $s
 }
 
+# Costruisce il path completo della cartella playlist sotto BASE_DIR,
+# trattando "/" nel nome come separatore di sottocartelle. Esempio:
+#   $Name="Videogames OST/Metal Gear Solid 2" → BASE_DIR/Videogames OST/Metal Gear Solid 2
+# Ogni componente viene sanitizzato indipendentemente. Senza "/" funziona
+# come prima (backward compatible — playlist senza subfolder restano flat).
+function ConvertTo-SafePlaylistPath {
+    param([string]$BaseDir, [string]$Name)
+    $path = $BaseDir
+    foreach ($component in ($Name -split '/')) {
+        $c = $component.Trim()
+        if (-not $c) { continue }
+        $safe = ConvertTo-SafeFolderName -Name $c
+        if ($safe) { $path = Join-Path $path $safe }
+    }
+    return $path
+}
+
 function Get-LocalCount {
     param([string]$Name)
-    $folder = ConvertTo-SafeFolderName -Name $Name
-    $dir = Join-Path $BASE_DIR $folder
+    $dir = ConvertTo-SafePlaylistPath -BaseDir $BASE_DIR -Name $Name
     if (-not (Test-Path -LiteralPath $dir)) { return 0 }
     # Exclude yt-dlp's *.temp.mp3 scratch files (partial downloads)
     return (Get-ChildItem -LiteralPath $dir -Filter "*.mp3" -ErrorAction SilentlyContinue |
@@ -92,33 +189,61 @@ function Get-LocalCount {
 
 function Get-UnavailableCount {
     param([string]$Name)
-    $folder = ConvertTo-SafeFolderName -Name $Name
-    $path = Join-Path (Join-Path $BASE_DIR $folder) "_unavailable.txt"
+    $dir  = ConvertTo-SafePlaylistPath -BaseDir $BASE_DIR -Name $Name
+    $path = Join-Path $dir "_unavailable.txt"
     if (-not (Test-Path -LiteralPath $path)) { return 0 }
     return (Get-Content -LiteralPath $path | Where-Object { $_.Trim() -ne "" }).Count
 }
 
+# GUI Windows usa il Linux worker come "proxy yt-dlp": niente yt-dlp/ffmpeg
+# installato localmente, tutto via SSH al laptop che ha già yt-dlp + cookies.
+# L'host viene da $LINUX_WORKER_HOST in config.ps1 (vuoto = no proxy SSH).
+$script:LINUX_WORKER_HOST = if ((Get-Variable -Name LINUX_WORKER_HOST -ErrorAction SilentlyContinue) -and $LINUX_WORKER_HOST) {
+    $LINUX_WORKER_HOST
+} else {
+    ""
+}
+$script:LINUX_COOKIES = "~/blackjack/cookies.txt"
+
+function Invoke-YtdlpOnWorker {
+    param([string]$Url, [string]$PrintTemplate)
+    # Se $LINUX_WORKER_HOST configurato: yt-dlp gira sul worker via SSH.
+    # Altrimenti fallback: yt-dlp locale Windows (richiede install yt-dlp).
+    if ($script:LINUX_WORKER_HOST) {
+        try {
+            $safeUrl = $Url -replace "'", "'\''"
+            $remote  = "yt-dlp --cookies $script:LINUX_COOKIES --flat-playlist --print '$PrintTemplate' --playlist-end 1 '$safeUrl' 2>/dev/null"
+            $result  = ssh -o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=accept-new $script:LINUX_WORKER_HOST $remote 2>$null
+            if ($result) { return ($result | Select-Object -First 1).ToString().Trim() }
+        } catch {}
+    } else {
+        try {
+            $a = @("--flat-playlist", "--print", $PrintTemplate, "--playlist-end", "1")
+            if ((Get-Variable -Name COOKIES_FROM_BROWSER -ErrorAction SilentlyContinue) -and $COOKIES_FROM_BROWSER) {
+                $a += @("--cookies-from-browser", $COOKIES_FROM_BROWSER)
+            }
+            if ((Get-Variable -Name COOKIES_FILE -ErrorAction SilentlyContinue) -and $COOKIES_FILE -and (Test-Path -LiteralPath $COOKIES_FILE)) {
+                $a += @("--cookies", $COOKIES_FILE)
+            }
+            $a += $Url
+            $result = & yt-dlp @a 2>$null
+            if ($result) { return ($result | Select-Object -First 1).ToString().Trim() }
+        } catch {}
+    }
+    return ""
+}
+
 function Get-YoutubeCount {
     param([string]$Url)
-    try {
-        $json = yt-dlp --flat-playlist --dump-single-json --quiet $Url 2>$null
-        if ($json -and $json -ne "null") {
-            $data = $json | ConvertFrom-Json -ErrorAction SilentlyContinue
-            if ($data -and $data.entries) { return $data.entries.Count }
-        }
-    } catch {}
+    $out = Invoke-YtdlpOnWorker -Url $Url -PrintTemplate "%(playlist_count)s"
+    if ($out -match '^\d+$') { return [int]$out }
     return -1
 }
 
 function Get-YoutubePlaylistTitle {
     param([string]$Url)
-    try {
-        $json = yt-dlp --flat-playlist --dump-single-json --quiet $Url 2>$null
-        if ($json -and $json -ne "null") {
-            $data = $json | ConvertFrom-Json -ErrorAction SilentlyContinue
-            if ($data -and $data.title) { return $data.title }
-        }
-    } catch {}
+    $out = Invoke-YtdlpOnWorker -Url $Url -PrintTemplate "%(playlist_title)s"
+    if ($out) { return $out }
     return ""
 }
 
@@ -438,7 +563,10 @@ $nameBox.Location = New-Object System.Drawing.Point(60, 71)
 $btnAdd = Make-Button "Add & Save" $greenColor 110
 $btnAdd.Location = New-Object System.Drawing.Point(550, 70)
 
-$addPanelBg.Controls.AddRange(@($addLabel, $urlLabel, $urlBox, $btnFetch, $nameLabel, $nameBox, $btnAdd))
+$btnMultiAdd = Make-Button "+ Multi..." $cardColor 100
+$btnMultiAdd.Location = New-Object System.Drawing.Point(670, 70)
+
+$addPanelBg.Controls.AddRange(@($addLabel, $urlLabel, $urlBox, $btnFetch, $nameLabel, $nameBox, $btnAdd, $btnMultiAdd))
 $form.Controls.Add($addPanelBg)
 
 # =============================================================================
@@ -1185,8 +1313,178 @@ function Show-ScheduleDialog {
 }
 
 # =============================================================================
+# MULTI-ADD DIALOG
+# Incolla N URL (uno per riga), fetcha i nomi automaticamente,
+# deduplica per list= ID, aggiunge tutto in batch al config.
+# =============================================================================
+
+function Show-MultiAddDialog {
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text            = "Multi Add Playlists"
+    $dlg.Size            = New-Object System.Drawing.Size(640, 600)
+    $dlg.StartPosition   = "CenterParent"
+    $dlg.FormBorderStyle = "FixedDialog"
+    $dlg.MaximizeBox     = $false
+    $dlg.MinimizeBox     = $false
+    $dlg.BackColor       = $bgColor
+    $dlg.ForeColor       = $textColor
+    $dlg.Font            = $fontMain
+
+    $lblTitle = Make-Label "Aggiungi più playlist in una volta" $fontTitle $accentColor
+    $lblTitle.Location = New-Object System.Drawing.Point(16, 14)
+    $dlg.Controls.Add($lblTitle)
+
+    $lblHint = Make-Label "Incolla gli URL YouTube — uno per riga. Il nome viene fetchato automaticamente." $fontMain $mutedColor
+    $lblHint.Location = New-Object System.Drawing.Point(16, 54)
+    $dlg.Controls.Add($lblHint)
+
+    $lblSubfolder = Make-Label "Sub-folder (opzionale — es. 'Videogames OST', le playlist andranno sotto questa cartella):" $fontMain $mutedColor
+    $lblSubfolder.Location = New-Object System.Drawing.Point(16, 80)
+    $dlg.Controls.Add($lblSubfolder)
+
+    $txtSubfolder = Make-TextBox 600
+    $txtSubfolder.Location = New-Object System.Drawing.Point(16, 104)
+    $dlg.Controls.Add($txtSubfolder)
+
+    $lblUrls = Make-Label "URL playlist:" $fontBold $mutedColor
+    $lblUrls.Location = New-Object System.Drawing.Point(16, 142)
+    $dlg.Controls.Add($lblUrls)
+
+    $txtUrls = New-Object System.Windows.Forms.TextBox
+    $txtUrls.Multiline     = $true
+    $txtUrls.ScrollBars    = "Vertical"
+    $txtUrls.AcceptsReturn = $true
+    $txtUrls.Location      = New-Object System.Drawing.Point(16, 166)
+    $txtUrls.Size          = New-Object System.Drawing.Size(600, 260)
+    $txtUrls.BackColor     = $cardColor
+    $txtUrls.ForeColor     = $textColor
+    $txtUrls.Font          = $fontMono
+    $txtUrls.BorderStyle   = "FixedSingle"
+    $dlg.Controls.Add($txtUrls)
+
+    $lblStatus = Make-Label "Pronto. Incolla qualcosa sopra e premi 'Fetch & Add All'." $fontMain $mutedColor
+    $lblStatus.AutoSize = $false
+    $lblStatus.Size     = New-Object System.Drawing.Size(600, 50)
+    $lblStatus.Location = New-Object System.Drawing.Point(16, 436)
+    $dlg.Controls.Add($lblStatus)
+
+    $btnFetchAll = Make-Button "▶  Fetch & Add All" $greenColor 170
+    $btnFetchAll.Location = New-Object System.Drawing.Point(16, 500)
+    $dlg.Controls.Add($btnFetchAll)
+
+    $btnClose = Make-Button "Chiudi" $cardColor 100
+    $btnClose.Location = New-Object System.Drawing.Point(196, 500)
+    $btnClose.add_Click({ $dlg.Close() })
+    $dlg.Controls.Add($btnClose)
+
+    $btnFetchAll.add_Click({
+        $btnFetchAll.Enabled = $false
+        $btnFetchAll.Text    = "Working..."
+        $dlg.Cursor          = [System.Windows.Forms.Cursors]::WaitCursor
+
+        $lines = $txtUrls.Text -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
+        $total = @($lines).Count
+        if ($total -eq 0) {
+            $lblStatus.Text      = "Nessuna URL fornita."
+            $lblStatus.ForeColor = $orangeColor
+            $btnFetchAll.Enabled = $true
+            $btnFetchAll.Text    = "▶  Fetch & Add All"
+            $dlg.Cursor          = [System.Windows.Forms.Cursors]::Default
+            return
+        }
+
+        $added = 0; $skipped = 0; $failed = 0
+        $logBox.AppendText("[MULTI-ADD] inizio batch di $total URL...`r`n")
+        $i = 0
+        foreach ($url in $lines) {
+            $i++
+            $lblStatus.Text      = "Processing $i di $total : $url"
+            $lblStatus.ForeColor = $mutedColor
+            [System.Windows.Forms.Application]::DoEvents()
+
+            $shortUrl = if ($url.Length -gt 60) { $url.Substring(0, 57) + "..." } else { $url }
+
+            # Extract list= ID
+            $listId = ""
+            if ($url -match 'list=([\w-]+)') { $listId = $matches[1] }
+            if (-not $listId) {
+                $logBox.AppendText("[MULTI-ADD] ✗ $shortUrl — manca list= nell'URL`r`n")
+                $failed++; continue
+            }
+
+            # Dedup by list ID against existing grid rows
+            $isDupe = $false
+            $dupeName = ""
+            for ($r = 0; $r -lt $grid.Rows.Count; $r++) {
+                $rowUrl = [string]$grid.Rows[$r].Tag
+                if ($rowUrl -match 'list=([\w-]+)' -and $matches[1] -eq $listId) {
+                    $isDupe = $true
+                    $dupeName = [string]$grid.Rows[$r].Cells[1].Value
+                    break
+                }
+            }
+            if ($isDupe) {
+                $logBox.AppendText("[MULTI-ADD] (dup) $listId già presente come '$dupeName'`r`n")
+                $skipped++; continue
+            }
+
+            # Fetch title from YouTube
+            $title = Get-YoutubePlaylistTitle -Url $url
+            if (-not $title) {
+                $logBox.AppendText("[MULTI-ADD] ✗ $listId — yt-dlp non ha tornato il titolo (playlist privata? metti Unlisted su YouTube)`r`n")
+                $failed++; continue
+            }
+
+            # Sanitize title
+            $safeTitle = ConvertTo-SafeFolderName -Name $title
+            if ([string]::IsNullOrWhiteSpace($safeTitle)) {
+                $logBox.AppendText("[MULTI-ADD] ✗ $listId — titolo vuoto dopo sanitizzazione (titolo originale: '$title')`r`n")
+                $failed++; continue
+            }
+
+            # Apply optional subfolder prefix: "Subfolder/Title"
+            # Sync scripts trattano "/" come separatore di sottocartelle.
+            $subfolder = $txtSubfolder.Text.Trim()
+            $fullName = if ($subfolder) { "$subfolder/$safeTitle" } else { $safeTitle }
+
+            # Persist + grid
+            $ok = Add-PlaylistToConfig -Name $fullName -Url $url
+            if ($ok) {
+                $row = $grid.Rows.Add($false, $fullName, 0, "?", 0, "Not checked")
+                $grid.Rows[$row].Tag = $url
+                $logBox.AppendText("[MULTI-ADD] ✓ aggiunta '$fullName'`r`n")
+                $added++
+            } else {
+                $logBox.AppendText("[MULTI-ADD] ✗ $listId — Add-PlaylistToConfig ha fallito (config.ps1 non scrivibile?)`r`n")
+                $failed++
+            }
+            [System.Windows.Forms.Application]::DoEvents()
+        }
+
+        Update-GridScrollbar
+
+        $lblStatus.Text = "Fatto. Aggiunte: $added · Duplicate: $skipped · Errori: $failed"
+        if ($failed -gt 0)     { $lblStatus.ForeColor = $orangeColor }
+        elseif ($added -eq 0)  { $lblStatus.ForeColor = $mutedColor }
+        else                   { $lblStatus.ForeColor = $greenColor }
+
+        $btnFetchAll.Enabled = $true
+        $btnFetchAll.Text    = "▶  Fetch & Add All"
+        $dlg.Cursor          = [System.Windows.Forms.Cursors]::Default
+        if ($added -gt 0) { $txtUrls.Text = "" }
+
+        $logBox.AppendText("[MULTI-ADD] fine batch — Aggiunte: $added, duplicate: $skipped, errori: $failed`r`n")
+    })
+
+    [void]$dlg.ShowDialog()
+}
+
+# =============================================================================
 # EVENT HANDLERS
 # =============================================================================
+
+# Multi Add button
+$btnMultiAdd.add_Click({ Show-MultiAddDialog })
 
 # Select All
 $btnSelectAll.add_Click({
@@ -1543,6 +1841,7 @@ $form.add_FormClosing({
 # =============================================================================
 
 $logBox.AppendText("[READY] blackjack-music-sync v3.0`r`n")
+if ($script:healthCheckSummary) { $logBox.AppendText($script:healthCheckSummary + "`r`n") }
 $logBox.AppendText("[INFO] Click 'Refresh Status' to check all playlists.`r`n")
 
 # No scan at startup — the grid shows "?" until the user clicks Refresh.

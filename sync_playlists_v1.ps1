@@ -85,6 +85,22 @@ function ConvertTo-SafeFolderName {
     return $s
 }
 
+# Tratta "/" nel nome come separatore di sottocartelle. Esempio:
+#   "Videogames OST/MGS2 OST" → BASE_DIR/Videogames OST/MGS2 OST
+# Ogni componente è sanitizzato indipendentemente. Backward compatible:
+# nomi senza "/" producono il path piatto come prima.
+function ConvertTo-SafePlaylistPath {
+    param([string]$BaseDir, [string]$Name)
+    $path = $BaseDir
+    foreach ($component in ($Name -split '/')) {
+        $c = $component.Trim()
+        if (-not $c) { continue }
+        $safe = ConvertTo-SafeFolderName -Name $c
+        if ($safe) { $path = Join-Path $path $safe }
+    }
+    return $path
+}
+
 # -----------------------------------------------------------------------------
 # FUNCTIONS - LOG
 # -----------------------------------------------------------------------------
@@ -326,20 +342,20 @@ function Update-M3u {
 function Sync-Playlist {
     param([string]$Name, [string]$Url)
 
-    # Sanitize for filesystem use — keeps $Name unchanged for logging
-    $folderName  = ConvertTo-SafeFolderName -Name $Name
-    $destDir     = Join-Path $BASE_DIR $folderName
+    # Build destination path. Supporta "/" nel nome come separatore di
+    # sottocartelle (es. "Videogames OST/MGS2 OST" → BASE_DIR/Videogames OST/MGS2 OST).
+    $destDir     = ConvertTo-SafePlaylistPath -BaseDir $BASE_DIR -Name $Name
     $archivePath = Join-Path $destDir ".archive"
     $mapPath     = Join-Path $destDir "_id_map.txt"
 
     Write-Log "==============================="
     Write-Log "Syncing: $Name"
-    if ($folderName -ne $Name) {
-        Write-Log "  (folder name sanitized to: $folderName)"
+    if ($destDir -notlike "*$Name*") {
+        Write-Log "  (folder path: $destDir)"
     }
 
     if (-not (Test-Path -LiteralPath $destDir)) {
-        New-Item -ItemType Directory -Path $destDir | Out-Null
+        New-Item -ItemType Directory -Path $destDir -Force | Out-Null
         Write-Log "Created folder: $destDir"
     }
 
@@ -515,8 +531,9 @@ function Sync-Playlist {
         Save-IdMap -MapPath $mapPath -Map $idMap
     }
 
-    # 7. Update .m3u
-    Update-M3u -FolderPath $destDir -PlaylistName $folderName
+    # 7. Update .m3u — usa l'ultimo segmento del path come nome del file m3u
+    $m3uName = Split-Path -Path $destDir -Leaf
+    Update-M3u -FolderPath $destDir -PlaylistName $m3uName
 
     Write-Log "Done: $Name"
     Write-Log "==============================="

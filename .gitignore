@@ -35,3 +35,7 @@ _temp_v3_sync_config.ps1
 *.tar.gz
 *.7z
 *.rar
+
+# Linux worker — infrastruttura personale (script wrapper, paths,
+# credentials template). Resta locale, mai sul repo pubblico.
+linux-worker/

@@ -132,11 +132,23 @@ function ConvertTo-SafeFolderName {
     return $s
 }
 
+# Tratta "/" come separatore di sottocartelle (backward compatible).
+function ConvertTo-SafePlaylistPath {
+    param([string]$BaseDir, [string]$Name)
+    $path = $BaseDir
+    foreach ($component in ($Name -split '/')) {
+        $c = $component.Trim()
+        if (-not $c) { continue }
+        $safe = ConvertTo-SafeFolderName -Name $c
+        if ($safe) { $path = Join-Path $path $safe }
+    }
+    return $path
+}
+
 function Check-Playlist {
     param([string]$Name, [string]$Url)
 
-    $folderName  = ConvertTo-SafeFolderName -Name $Name
-    $folder      = Join-Path $BASE_DIR $folderName
+    $folder      = ConvertTo-SafePlaylistPath -BaseDir $BASE_DIR -Name $Name
     $archivePath = Join-Path $folder ".archive"
     $unavailPath = Join-Path $folder "_unavailable.txt"
 

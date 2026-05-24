@@ -496,8 +496,17 @@ function Sync-Playlist {
     $currentUnavailable = New-Object System.Collections.Generic.List[string]
     if (Test-Path -LiteralPath $ytOutputPath) {
         Get-Content -LiteralPath $ytOutputPath | ForEach-Object {
-            if ($_ -match 'ERROR: \[youtube\] (\S+):') {
-                $id = $matches[1]
+            if ($_ -match 'ERROR: \[youtube\] (\S+): (.+)$') {
+                $id     = $matches[1]
+                $reason = $matches[2]
+                # Skip TRANSIENT errors — anti-bot and rate-limit are not permanent
+                # ("unavailable.txt" would otherwise blacklist a perfectly fine
+                # video forever after a single anti-bot hit during a long batch).
+                if ($reason -like "*Sign in to confirm*not a bot*" -or
+                    $reason -like "*rate-limited by YouTube*" -or
+                    $reason -like "*This content isn't available, try again later*") {
+                    return
+                }
                 if (-not $currentUnavailable.Contains($id)) {
                     [void]$currentUnavailable.Add($id)
                 }

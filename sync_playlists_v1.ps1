@@ -430,7 +430,12 @@ function Sync-Playlist {
         "--paths", "temp:$ytTempDir",
         "--paths", "home:$destDir",
         "--output", "%(playlist_index)s. %(title)s.%(ext)s",
-        "--ignore-errors"
+        "--ignore-errors",
+        # Sleep 2-5s random tra ogni download per evitare anti-bot YouTube
+        # su batch lunghi (>200 tracce). +30 min totali su batch grandi ma
+        # quasi mai trigger anti-bot.
+        "--sleep-interval", "2",
+        "--max-sleep-interval", "5"
     )
     if ($COOKIES_FROM_BROWSER) {
         $ytArgs += @("--cookies-from-browser", $COOKIES_FROM_BROWSER)

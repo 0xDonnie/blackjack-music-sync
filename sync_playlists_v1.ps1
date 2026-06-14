@@ -432,10 +432,14 @@ function Sync-Playlist {
         "--output", "%(playlist_index)s. %(title)s.%(ext)s",
         "--ignore-errors",
         # Sleep 2-5s random tra ogni download per evitare anti-bot YouTube
-        # su batch lunghi (>200 tracce). +30 min totali su batch grandi ma
-        # quasi mai trigger anti-bot.
         "--sleep-interval", "2",
-        "--max-sleep-interval", "5"
+        "--max-sleep-interval", "5",
+        # Metadata: setta Album/Album Artist/Track # via yt-dlp parse-metadata.
+        # Title e Artist restano dal video, vengono poi raffinati dal
+        # post-process retag_mp3s.py (dispatch per durata < o > 60 min).
+        "--parse-metadata", "%(playlist|)s:%(meta_album)s",
+        "--parse-metadata", "%(playlist_index|)s:%(meta_track)s",
+        "--parse-metadata", "%(uploader|)s:%(meta_album_artist)s"
     )
     if ($COOKIES_FROM_BROWSER) {
         $ytArgs += @("--cookies-from-browser", $COOKIES_FROM_BROWSER)
